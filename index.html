@@ -463,7 +463,6 @@ function monthKeys(){
 
 let STORE_NAMES = {"OCHNADB01": "KPN Adambakkam", "OCHNAMB02": "KPN Ambattur 02", "OCHNANN06": "KPN Anna Nagar 06", "OCHNCPR01": "KPN Chinna Porur", "OCHNCLM01": "KPN Choolaimedu", "OCHNGKM01": "KPN GKM Colony", "OCHNKKN02": "KPN KK Nagar 02", "OCHNKGR01": "KPN Kodungaiyur", "OCHNKTC01": "KPN Kolathur Teachers Colony", "OCHNKTP01": "KPN Kotturpuram", "OCHNMDB01": "KPN Madambakkam", "OCHNMPK01": "KPN Manapakkam", "OCHNMGP02": "KPN Mogappair 02", "OCHNMGP04": "KPN Mogappair 04", "OCHNMYL01": "KPN Mylapore 01", "OCHNMYL02": "KPN Mylapore 02", "OCHNOMR01": "KPN OMR Padur", "OCHNPML01": "KPN Pammal", "OCHNPBK01": "KPN Perumbakkam", "OCHNPER01": "KPN Perungudi", "OCHNPWK01": "KPN Purasaiwakkam", "OCHNROY01": "KPN Royapuram", "OCHNSAI01": "KPN Saidapet 01", "OCHNSSN01": "KPN Shastri Nagar", "OCHNTNG03": "KPN T.Nagar 03", "OCHNTMB01": "KPN Tambaram", "OCHNUTH01": "KPN Uthandi", "OCHNVAL01": "KPN Valmiki Nagar", "OCHNVEL02": "KPN Velachery 02", "OCHNVEP02": "KPN Vepery 02"};
 
-<<<<<<< HEAD
 /* ═══════════════════════════════════════════════
    DATE-WISE MTD HELPERS
    The sheet has one row per (site, category, channel, DATE).
@@ -548,11 +547,6 @@ function buildDynamicData(base26,base25){
   if (dateField) console.log(`[MTD] Date column detected: "${dateField}" — MTD totals filtered to days 1–${dtd}`);
   else console.warn('[MTD] No date column detected — MTD columns will fall back to full-month totals.');
 
-=======
-function buildDynamicData(base26,base25){
-  const all=[...base25.map(r=>({...r,__yr:'25'})),...base26.map(r=>({...r,__yr:'26'}))];
-  const mk=monthKeys();
->>>>>>> 045bd8b3eede0233e6e54780eef64271c1886f79
   const out={};
   const add=(row,key)=>{
     const cluster=row.Cluster || 'Unknown';
@@ -563,7 +557,6 @@ function buildDynamicData(base26,base25){
     if(!out[cluster][site]) out[cluster][site]={name:(STORE_NAMES[site]||site),cats:{}};
     if(!out[cluster][site].cats[cat]) out[cluster][site].cats[cat]={};
     if(!out[cluster][site].cats[cat][ch]) out[cluster][site].cats[cat][ch]={};
-<<<<<<< HEAD
     // Accumulate (sum) instead of overwrite — multiple date-rows roll up into one total
     const prev = out[cluster][site].cats[cat][ch][key] || [0,0];
     out[cluster][site].cats[cat][ch][key]=[
@@ -585,28 +578,33 @@ function buildDynamicData(base26,base25){
     if(month===mk.m1   && withinMTD) add(r,'c');  // May'26 MTD (1–dtd)
     if(month===mk.curr && withinMTD) add(r,'d');  // Jun'26 MTD (1–dtd)
     if(month===mk.ly   && withinMTD) add(r,'e');  // Jun'25 MTD (1–dtd)
-=======
-    out[cluster][site].cats[cat][ch][key]=[
-      Number(row.total_quantity||0),
-      Number(row.GMV||0)
-    ];
-  };
-  all.forEach(r=>{
-    const month=String(r.Month);
-    if(month===mk.m2) add(r,'a');
-    if(month===mk.m1) add(r,'b');
-    if(month===mk.curr) add(r,'d');
-    if(month===mk.ly) add(r,'e');
-    // current sheet MTD approximation using available month rows
-    if(month===mk.m1) add(r,'c');
->>>>>>> 045bd8b3eede0233e6e54780eef64271c1886f79
   });
   return out;
 }
 
 async function loadSheetData(){
+  // Guard against fetch() hanging forever (e.g. blocked/stalled network
+  // requests when this file is opened as file:// or behind a firewall
+  // that drops requests silently instead of erroring out).
+  const FETCH_TIMEOUT_MS = 20000;
+  const fetchWithTimeout = (url) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    return fetch(url, { signal: controller.signal })
+      .then(res => {
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+        return res;
+      })
+      .catch(err => {
+        clearTimeout(timer);
+        if (err.name === 'AbortError') throw new Error(`Timed out (>${FETCH_TIMEOUT_MS/1000}s) fetching ${url}`);
+        throw err;
+      });
+  };
+
   try{
-    const [r26,r25]=await Promise.all([fetch(BASE26_CSV),fetch(BASE25_CSV)]);
+    const [r26,r25]=await Promise.all([fetchWithTimeout(BASE26_CSV),fetchWithTimeout(BASE25_CSV)]);
     const [c26,c25]=await Promise.all([r26.text(),r25.text()]);
     DATA=buildDynamicData(csvToRows(c26),csvToRows(c25));
     CLUSTERS=Object.keys(DATA);
@@ -618,7 +616,11 @@ async function loadSheetData(){
     const ov=document.getElementById('loadingOverlay'); if(ov) ov.classList.add('hide');
   }catch(e){
     console.error('Google Sheet load failed',e);
-    document.getElementById('main').innerHTML='<div style="padding:20px;background:white;border-radius:10px">Unable to load Google Sheet data.</div>';
+    document.getElementById('main').innerHTML=`<div style="padding:20px;background:white;border-radius:10px">
+      <strong>Unable to load Google Sheet data.</strong><br>
+      <span style="color:#6b7280;font-size:12px">${(e && e.message) ? e.message : e}</span><br>
+      <span style="color:#6b7280;font-size:12px">If this file was opened directly (file://), try serving it via a local web server, and check the browser console (F12) for CORS/network errors.</span>
+    </div>`;
     const ov=document.getElementById('loadingOverlay'); if(ov) ov.classList.add('hide');
   }
 }
