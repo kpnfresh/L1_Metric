@@ -463,90 +463,9 @@ function monthKeys(){
 
 let STORE_NAMES = {"OCHNADB01": "KPN Adambakkam", "OCHNAMB02": "KPN Ambattur 02", "OCHNANN06": "KPN Anna Nagar 06", "OCHNCPR01": "KPN Chinna Porur", "OCHNCLM01": "KPN Choolaimedu", "OCHNGKM01": "KPN GKM Colony", "OCHNKKN02": "KPN KK Nagar 02", "OCHNKGR01": "KPN Kodungaiyur", "OCHNKTC01": "KPN Kolathur Teachers Colony", "OCHNKTP01": "KPN Kotturpuram", "OCHNMDB01": "KPN Madambakkam", "OCHNMPK01": "KPN Manapakkam", "OCHNMGP02": "KPN Mogappair 02", "OCHNMGP04": "KPN Mogappair 04", "OCHNMYL01": "KPN Mylapore 01", "OCHNMYL02": "KPN Mylapore 02", "OCHNOMR01": "KPN OMR Padur", "OCHNPML01": "KPN Pammal", "OCHNPBK01": "KPN Perumbakkam", "OCHNPER01": "KPN Perungudi", "OCHNPWK01": "KPN Purasaiwakkam", "OCHNROY01": "KPN Royapuram", "OCHNSAI01": "KPN Saidapet 01", "OCHNSSN01": "KPN Shastri Nagar", "OCHNTNG03": "KPN T.Nagar 03", "OCHNTMB01": "KPN Tambaram", "OCHNUTH01": "KPN Uthandi", "OCHNVAL01": "KPN Valmiki Nagar", "OCHNVEL02": "KPN Velachery 02", "OCHNVEP02": "KPN Vepery 02"};
 
-/* ═══════════════════════════════════════════════
-   DATE-WISE MTD HELPERS
-   The sheet has one row per (site, category, channel, DATE).
-   To get correct totals we must:
-     1) SUM every matching row (not just keep the last one)
-     2) For MTD columns, only include rows whose date-of-month
-        falls within 1..dtd (e.g. 1–13)
-═══════════════════════════════════════════════ */
-// Columns that are definitely NOT the per-row date column —
-// used to help auto-detect which column holds the date.
-const NON_DATE_FIELDS = ['Cluster','site_id','category_name','order_Source','total_quantity','GMV','Month','__yr'];
-
-// Parse common date string/serial formats into a JS Date.
-function parseDateStr(raw){
-  if (raw == null) return null;
-  const s = String(raw).trim();
-  if (!s) return null;
-
-  // yyyy-mm-dd or yyyy/mm/dd
-  let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
-  if (m) return new Date(+m[1], +m[2]-1, +m[3]);
-
-  // dd-Mon-yy(yy)  e.g. 1-Apr-2026, 01 Apr 26
-  m = s.match(/^(\d{1,2})[-\s\/](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[-\s\/](\d{2,4})/i);
-  if (m) {
-    const MO = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
-    const mon = MO[m[2].toLowerCase()];
-    let yr = +m[3]; if (yr < 100) yr += 2000;
-    return new Date(yr, mon, +m[1]);
-  }
-
-  // dd/mm/yyyy, mm/dd/yyyy or dd-mm-yyyy
-  m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
-  if (m) {
-    let a=+m[1], b=+m[2], yr=+m[3], day, mon;
-    if (a > 12) { day=a; mon=b; }
-    else if (b > 12) { day=b; mon=a; }
-    else { day=a; mon=b; } // ambiguous -> assume DD/MM (India default)
-    return new Date(yr, mon-1, day);
-  }
-
-  // Excel serial date number
-  if (/^\d{4,6}(\.\d+)?$/.test(s)) {
-    const n = Number(s);
-    if (n > 20000 && n < 60000) {
-      const epoch = new Date(1899,11,30);
-      return new Date(epoch.getTime() + Math.round(n)*86400000);
-    }
-  }
-  return null;
-}
-
-// Auto-detect which column in the sheet holds the per-row date,
-// so MTD (1..dtd) filtering can be applied correctly.
-function detectDateField(rows){
-  if (!rows.length) return null;
-  const headers = Object.keys(rows[0]).filter(h => !NON_DATE_FIELDS.includes(h));
-  const sample = rows.slice(0, Math.min(300, rows.length));
-  const scored = [];
-  for (const h of headers) {
-    let ok=0, total=0;
-    for (const r of sample) {
-      const v = r[h];
-      if (v === undefined || v === '') continue;
-      total++;
-      if (parseDateStr(v)) ok++;
-    }
-    if (total === 0) continue;
-    const ratio = ok/total;
-    if (ratio >= 0.8) scored.push({ h, ratio, nameBoost: /date|day/i.test(h) ? 1 : 0 });
-  }
-  if (!scored.length) return null;
-  scored.sort((x,y) => (y.nameBoost-x.nameBoost) || (y.ratio-x.ratio));
-  return scored[0].h;
-}
-
 function buildDynamicData(base26,base25){
   const all=[...base25.map(r=>({...r,__yr:'25'})),...base26.map(r=>({...r,__yr:'26'}))];
   const mk=monthKeys();
-  const dtd=DC.dtdDay; // last completed day of the current month (e.g. 13 → days 1–13)
-  const dateField=detectDateField(all);
-  if (dateField) console.log(`[MTD] Date column detected: "${dateField}" — MTD totals filtered to days 1–${dtd}`);
-  else console.warn('[MTD] No date column detected — MTD columns will fall back to full-month totals.');
-
   const out={};
   const add=(row,key)=>{
     const cluster=row.Cluster || 'Unknown';
@@ -557,54 +476,26 @@ function buildDynamicData(base26,base25){
     if(!out[cluster][site]) out[cluster][site]={name:(STORE_NAMES[site]||site),cats:{}};
     if(!out[cluster][site].cats[cat]) out[cluster][site].cats[cat]={};
     if(!out[cluster][site].cats[cat][ch]) out[cluster][site].cats[cat][ch]={};
-    // Accumulate (sum) instead of overwrite — multiple date-rows roll up into one total
-    const prev = out[cluster][site].cats[cat][ch][key] || [0,0];
     out[cluster][site].cats[cat][ch][key]=[
-      prev[0] + Number(row.total_quantity||0),
-      prev[1] + Number(row.GMV||0)
+      Number(row.total_quantity||0),
+      Number(row.GMV||0)
     ];
   };
   all.forEach(r=>{
-    const month=String(r.Month).trim();
-    const rowDate = dateField ? parseDateStr(r[dateField]) : null;
-    const day = rowDate ? rowDate.getDate() : null;
-    const withinMTD = dateField ? (day!=null && day<=dtd) : true; // no date col -> can't restrict, keep old behaviour
-
-    // ── FULL MONTH (sum of every date 1..last-day-of-month) ──
-    if(month===mk.m2) add(r,'a');   // Apr'26 FULL
-    if(month===mk.m1) add(r,'b');   // May'26 FULL
-
-    // ── MTD 1..dtd (e.g. 1–13) ──
-    if(month===mk.m1   && withinMTD) add(r,'c');  // May'26 MTD (1–dtd)
-    if(month===mk.curr && withinMTD) add(r,'d');  // Jun'26 MTD (1–dtd)
-    if(month===mk.ly   && withinMTD) add(r,'e');  // Jun'25 MTD (1–dtd)
+    const month=String(r.Month);
+    if(month===mk.m2) add(r,'a');
+    if(month===mk.m1) add(r,'b');
+    if(month===mk.curr) add(r,'d');
+    if(month===mk.ly) add(r,'e');
+    // current sheet MTD approximation using available month rows
+    if(month===mk.m1) add(r,'c');
   });
   return out;
 }
 
 async function loadSheetData(){
-  // Guard against fetch() hanging forever (e.g. blocked/stalled network
-  // requests when this file is opened as file:// or behind a firewall
-  // that drops requests silently instead of erroring out).
-  const FETCH_TIMEOUT_MS = 20000;
-  const fetchWithTimeout = (url) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-    return fetch(url, { signal: controller.signal })
-      .then(res => {
-        clearTimeout(timer);
-        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-        return res;
-      })
-      .catch(err => {
-        clearTimeout(timer);
-        if (err.name === 'AbortError') throw new Error(`Timed out (>${FETCH_TIMEOUT_MS/1000}s) fetching ${url}`);
-        throw err;
-      });
-  };
-
   try{
-    const [r26,r25]=await Promise.all([fetchWithTimeout(BASE26_CSV),fetchWithTimeout(BASE25_CSV)]);
+    const [r26,r25]=await Promise.all([fetch(BASE26_CSV),fetch(BASE25_CSV)]);
     const [c26,c25]=await Promise.all([r26.text(),r25.text()]);
     DATA=buildDynamicData(csvToRows(c26),csvToRows(c25));
     CLUSTERS=Object.keys(DATA);
@@ -616,11 +507,7 @@ async function loadSheetData(){
     const ov=document.getElementById('loadingOverlay'); if(ov) ov.classList.add('hide');
   }catch(e){
     console.error('Google Sheet load failed',e);
-    document.getElementById('main').innerHTML=`<div style="padding:20px;background:white;border-radius:10px">
-      <strong>Unable to load Google Sheet data.</strong><br>
-      <span style="color:#6b7280;font-size:12px">${(e && e.message) ? e.message : e}</span><br>
-      <span style="color:#6b7280;font-size:12px">If this file was opened directly (file://), try serving it via a local web server, and check the browser console (F12) for CORS/network errors.</span>
-    </div>`;
+    document.getElementById('main').innerHTML='<div style="padding:20px;background:white;border-radius:10px">Unable to load Google Sheet data.</div>';
     const ov=document.getElementById('loadingOverlay'); if(ov) ov.classList.add('hide');
   }
 }
