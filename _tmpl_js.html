@@ -755,459 +755,594 @@ function buildInsightContext(){
 }
 
 
-/* ══ DUCKDB-WASM ENGINE ══════════════════════════════════════════════════════
-   Runs entirely in the browser — no server, no API key.
-   Parquet files (store_metrics.parquet, ksin_metrics.parquet) must be in the
-   same folder as index.html (or same GitHub Pages repo root).
+
+/* ══════════════════════════════════════════════════════════════════════════
+   KPN FRESH — OPEN-SOURCE INTELLIGENCE ENGINE
+   100% browser-based. No API key. No server. Works on GitHub Pages.
+   Data source: D1 (store×L2×period), D2 (store×KSIN), D3 (chain×KSIN)
    ══════════════════════════════════════════════════════════════════════════ */
 
-var _db = null;
-var _dbReady = false;
-var _dbLoading = false;
-var _dbCallbacks = [];
+/* ── PERIOD CONFIG ── */
+var OI_PERIODS = {
+  'mar':       {key:'mar_full', label:'Mar Full'},
+  'march':     {key:'mar_full', label:'Mar Full'},
+  'apr':       {key:'apr_full', label:'Apr Full'},
+  'april':     {key:'apr_full', label:'Apr Full'},
+  'may full':  {key:'may_full', label:'May Full'},
+  'may':       {key:'may_mtd',  label:'May MTD'},
+  'jun':       {key:'jun_mtd',  label:'Jun MTD'},
+  'june':      {key:'jun_mtd',  label:'Jun MTD'},
+  'last month':{key:'may_mtd',  label:'May MTD'},
+  'this month':{key:'jun_mtd',  label:'Jun MTD'},
+  'latest':    {key:'jun_mtd',  label:'Jun MTD'},
+  'current':   {key:'jun_mtd',  label:'Jun MTD'},
+};
+var OI_3M = [{key:'apr_full',label:'Apr'},{key:'may_full',label:'May Full'},{key:'jun_mtd',label:'Jun MTD'}];
+var OI_ALL = [{key:'mar_full',label:'Mar'},{key:'apr_full',label:'Apr'},{key:'may_full',label:'May Full'},{key:'may_mtd',label:'May MTD'},{key:'jun_mtd',label:'Jun MTD'}];
+var OI_CLUSTERS_LIST = ['Ananth','Mahesh','Alagiri','Hinduraj P','Hari Govindan'];
+var OI_L1_LIST = ['Fruits','Vegetables','FMCG Food','FMCG Non Food','Staples','Poultry','KPN Cafe','Others'];
 
-async function initDuckDB() {
-  if (_dbReady) return _db;
-  if (_dbLoading) {
-    return new Promise(function(res){ _dbCallbacks.push(res); });
+/* ── FORMAT HELPERS ── */
+function fmtV(v,m){
+  if(!v||isNaN(v)||v===0)return'\u2014';
+  if(m==='gmv'){
+    if(v>=1e7)return'\u20b9'+(v/1e7).toFixed(2)+'Cr';
+    if(v>=1e5)return'\u20b9'+(v/1e5).toFixed(2)+'L';
+    if(v>=1e3)return'\u20b9'+(v/1e3).toFixed(1)+'K';
+    return '\u20b9'+Math.round(v);
   }
-  _dbLoading = true;
-
-  // Load DuckDB-WASM from CDN
-  const CDN = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/dist/';
-  const BUNDLES = {
-    mvp: { mainModule: CDN+'duckdb-mvp.wasm', mainWorker: CDN+'duckdb-browser-mvp.worker.js' },
-    eh:  { mainModule: CDN+'duckdb-eh.wasm',  mainWorker: CDN+'duckdb-browser-eh.worker.js'  },
-  };
-
-  await new Promise(function(res,rej){
-    var s = document.createElement('script');
-    s.src = CDN + 'duckdb-browser.cjs.js';
-    s.onload = res; s.onerror = rej;
-    document.head.appendChild(s);
-  });
-
-  const duckdb = window.duckdb;
-  const bundle = await duckdb.selectBundle(BUNDLES);
-  const workerUrl = URL.createObjectURL(
-    new Blob(['importScripts("'+bundle.mainWorker+'")'], {type:'text/javascript'})
-  );
-  const worker = new Worker(workerUrl);
-  const logger = new duckdb.ConsoleLogger();
-  const db = new duckdb.AsyncDuckDB(logger, worker);
-  await db.instantiate(bundle.mainModule, CDN+'duckdb-browser.cjs.js');
-
-  const conn = await db.connect();
-
-  // Determine base URL for parquet files (works on GitHub Pages and localhost)
-  const base = (location.href.replace(/\/[^/]*$/, '') + '/');
-
-  // Load parquet files
-  await conn.query("INSTALL httpfs; LOAD httpfs;");
-  await conn.query("CREATE TABLE store_metrics AS SELECT * FROM read_parquet('"+base+"store_metrics.parquet')");
-  await conn.query("CREATE TABLE ksin_metrics  AS SELECT * FROM read_parquet('"+base+"ksin_metrics.parquet')");
-
-  await conn.close();
-  _db = db;
-  _dbReady = true;
-  _dbLoading = false;
-  _dbCallbacks.forEach(function(cb){ cb(db); });
-  _dbCallbacks = [];
-  return db;
+  if(v>=1e5)return(v/1e5).toFixed(2)+'L';
+  if(v>=1e3)return(v/1e3).toFixed(1)+'K';
+  return Math.round(v).toString();
 }
+function pctChgStr(a,b){if(!b)return'0.0%';var p=((a-b)/b*100).toFixed(1);return(p>=0?'+':'')+p+'%';}
+function trendIcon(a,b){return a>=b?'\uD83D\uDCC8':'\uD83D\uDCC9';}
+function badgeClr(a,b){return a>=b?'#4ade80':'#f87171';}
+function badgeBg(a,b) {return a>=b?'#052e16':'#450a0a';}
+function pctNum(a,b){return b?((a-b)/b*100):0;}
 
-async function dbQuery(sql) {
-  var db = await initDuckDB();
-  var conn = await db.connect();
-  var result = await conn.query(sql);
-  await conn.close();
-  // Convert Arrow table to plain array of objects
-  var schema = result.schema.fields.map(function(f){ return f.name; });
-  var rows = [];
-  for (var i = 0; i < result.numRows; i++) {
-    var row = {};
-    schema.forEach(function(col){
-      var val = result.getChildAt(schema.indexOf(col)).get(i);
-      row[col] = (val !== null && val !== undefined) ? Number(val) || String(val) : null;
+/* ── D1 AGGREGATION HELPERS ── */
+function allSiteIds(){return Object.keys(D1).filter(function(s){return D1[s]&&D1[s].name;});}
+
+function siteVal(sid,ch,l1,period,metric){
+  var sd=D1[sid];if(!sd)return 0;
+  var chs=ch==='ALL'?['POS','ECOM']:[ch];
+  var total=0;
+  chs.forEach(function(c){
+    if(!sd[c])return;
+    var l1s=l1==='ALL'?Object.keys(sd[c]):[l1];
+    l1s.forEach(function(cat){
+      Object.keys(sd[c][cat]||{}).forEach(function(l2){
+        var p=(sd[c][cat][l2]||{})[period];
+        if(p)total+=(metric==='nob'?p.N:metric==='qty'?p.Q:p.G)||0;
+      });
     });
-    rows.push(row);
-  }
-  return rows;
-}
-
-/* ── FORMAT HELPERS ── */
-function fmtV(v, metric) {
-  if (!v || isNaN(v) || v === 0) return '—';
-  if (metric === 'gmv') {
-    if (v >= 1e7) return '₹'+(v/1e7).toFixed(2)+'Cr';
-    if (v >= 1e5) return '₹'+(v/1e5).toFixed(2)+'L';
-    if (v >= 1e3) return '₹'+(v/1e3).toFixed(1)+'K';
-    return '₹'+Math.round(v);
-  }
-  if (v >= 1e5) return (v/1e5).toFixed(2)+'L';
-  if (v >= 1e3) return (v/1e3).toFixed(1)+'K';
-  return Math.round(v).toString();
-}
-function pctStr(a, b) {
-  if (!b) return '0.0%';
-  var p = ((a - b) / b * 100).toFixed(1);
-  return (p >= 0 ? '+' : '') + p + '%';
-}
-function trend(a, b) { return a >= b ? '📈' : '📉'; }
-function badgeClr(pct) { return pct && pct.startsWith('-') ? '#f87171' : '#4ade80'; }
-function badgeBg(pct)  { return pct && pct.startsWith('-') ? '#450a0a' : '#052e16'; }
-
-/* ══ AI INSIGHTS (DuckDB-powered, no API) ══ */
-
-/* ══════════════════════════════════════════════════════════════════════════════
-   OPEN-SOURCE AI INSIGHTS ENGINE
-   Runs 100% in the browser — no API key, no server.
-   Uses D1/D2 data already embedded in the page + DuckDB-WASM for Open Insights.
-   ══════════════════════════════════════════════════════════════════════════════ */
-
-/* ── FORMAT HELPERS ── */
-function fmtV(v, metric) {
-  if (!v || isNaN(v) || v === 0) return '—';
-  if (metric === 'gmv') {
-    if (v >= 1e7) return '₹'+(v/1e7).toFixed(2)+'Cr';
-    if (v >= 1e5) return '₹'+(v/1e5).toFixed(2)+'L';
-    if (v >= 1e3) return '₹'+(v/1e3).toFixed(1)+'K';
-    return '₹'+Math.round(v);
-  }
-  if (v >= 1e5) return (v/1e5).toFixed(2)+'L';
-  if (v >= 1e3) return (v/1e3).toFixed(1)+'K';
-  return Math.round(v).toString();
-}
-function pctChgStr(a, b) {
-  if (!b) return '0.0%';
-  var p = ((a - b) / b * 100).toFixed(1);
-  return (p >= 0 ? '+' : '') + p + '%';
-}
-function trendIcon(a, b) { return a >= b ? '📈' : '📉'; }
-function badgeClr(a, b)  { return a >= b ? '#4ade80' : '#f87171'; }
-function badgeBg(a, b)   { return a >= b ? '#052e16' : '#450a0a'; }
-
-/* ── D1 AGGREGATION HELPERS (use embedded data, no DuckDB needed) ── */
-function allSiteIds() { return Object.keys(D1).filter(function(s){ return D1[s] && D1[s].name; }); }
-
-function siteVal(sid, channel, l1, period, metric) {
-  var sd = D1[sid]; if (!sd) return 0;
-  var channels = channel === 'ALL' ? ['POS','ECOM'] : [channel];
-  var total = 0;
-  channels.forEach(function(ch) {
-    if (!sd[ch]) return;
-    if (l1 === 'ALL') {
-      Object.keys(sd[ch]).forEach(function(cat) {
-        Object.keys(sd[ch][cat] || {}).forEach(function(l2) {
-          var p = (sd[ch][cat][l2] || {})[period]; if (p) total += (metric==='nob'?p.N:metric==='qty'?p.Q:p.G)||0;
-        });
-      });
-    } else {
-      Object.keys(sd[ch][l1] || {}).forEach(function(l2) {
-        var p = (sd[ch][l1][l2] || {})[period]; if (p) total += (metric==='nob'?p.N:metric==='qty'?p.Q:p.G)||0;
-      });
-    }
   });
   return total;
 }
 
-function clusterVal(cluster, period, metric) {
-  var sites = cluster === 'ALL' ? allSiteIds() : allSiteIds().filter(function(s){ return D1[s].cluster === cluster; });
-  return sites.reduce(function(sum, sid){ return sum + siteVal(sid, 'ALL', 'ALL', period, metric); }, 0);
+function clusterVal(cl,period,metric){
+  var sites=cl==='ALL'?allSiteIds():allSiteIds().filter(function(s){return D1[s].cluster===cl;});
+  return sites.reduce(function(s,sid){return s+siteVal(sid,'ALL','ALL',period,metric);},0);
 }
 
-function l1Val(l1cat, cluster, period, metric) {
-  var sites = cluster === 'ALL' ? allSiteIds() : allSiteIds().filter(function(s){ return D1[s].cluster === cluster; });
-  return sites.reduce(function(sum, sid){ return sum + siteVal(sid, 'ALL', l1cat, period, metric); }, 0);
+function l1Val(l1cat,cl,period,metric){
+  var sites=cl==='ALL'?allSiteIds():allSiteIds().filter(function(s){return D1[s].cluster===cl;});
+  return sites.reduce(function(s,sid){return s+siteVal(sid,'ALL',l1cat,period,metric);},0);
 }
 
-/* ══ AI INSIGHTS (fully open-source, uses D1 data) ══ */
-function loadAIInsights(containerId) {
-  var el = document.getElementById(containerId);
-  if (!el) return;
-  if (el.dataset.loaded === '1') return;
-  el.dataset.loaded = '1';
-  el.innerHTML = '<div style="color:#a78bfa;font-size:12px;padding:10px">⚙️ Computing insights...</div>';
+/* ════════════════════════════════════════════════════════════
+   AI INSIGHTS ENGINE — Premium analytics, zero API calls
+   ════════════════════════════════════════════════════════════ */
+function loadAIInsights(containerId){
+  var el=document.getElementById(containerId);
+  if(!el)return;
+  if(el.dataset.loaded==='1')return;
+  el.dataset.loaded='1';
+  el.innerHTML='<div style="color:#a78bfa;font-size:12px;padding:10px;display:flex;align-items:center;gap:8px">'
+    +'<span style="display:inline-block;width:14px;height:14px;border:2px solid #a78bfa;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite"></span>'
+    +'Computing insights from '+allSiteIds().length+' stores\u2026</div>';
 
-  setTimeout(function() {
-    try {
+  setTimeout(function(){
+    try{
       var metric  = S.metric.toLowerCase();
-      var cluster = (S.cluster && S.cluster !== 'ALL') ? S.cluster : 'ALL';
-      var scope   = cluster === 'ALL' ? 'All Stores' : cluster + ' Cluster';
-      var insights = [];
+      var cluster = (S.cluster&&S.cluster!=='ALL')?S.cluster:'ALL';
+      var scope   = cluster==='ALL'?'All 30 Stores':cluster+' Cluster';
+      var sites   = cluster==='ALL'?allSiteIds():allSiteIds().filter(function(s){return D1[s].cluster===cluster;});
+      var ins=[];
 
-      // ── 1. Overall MoM trend
-      var mv = clusterVal(cluster, 'may_mtd', metric);
-      var jv = clusterVal(cluster, 'jun_mtd', metric);
-      var p1 = pctChgStr(jv, mv);
-      var mood = parseFloat(p1) > 5 ? 'Strong growth momentum.' : parseFloat(p1) > 0 ? 'Marginal growth.' : 'Declining — needs attention.';
-      insights.push(trendIcon(jv,mv)+' <strong>Overall '+metric.toUpperCase()+'</strong> for '+scope+': May MTD '+fmtV(mv,metric)+' → Jun MTD '+fmtV(jv,metric)+' ('+p1+' MoM). '+mood);
+      /* 1. OVERALL MoM PULSE */
+      var mv=clusterVal(cluster,'may_mtd',metric);
+      var jv=clusterVal(cluster,'jun_mtd',metric);
+      var p1=pctNum(jv,mv);
+      var p1s=pctChgStr(jv,mv);
+      var mood=p1>8?'\uD83D\uDFE2 Strong growth — sustain momentum.':p1>3?'\uD83D\uDFE1 Moderate growth — potential to accelerate.':p1>0?'\u26A0\uFE0F Marginal growth — watch closely.':'\uD83D\uDD34 Declining — immediate action needed.';
+      ins.push({icon:trendIcon(jv,mv),color:badgeClr(jv,mv),
+        title:'Overall '+metric.toUpperCase()+' Pulse',
+        body:'<strong>'+scope+'</strong>: May MTD <span class="iv">'+fmtV(mv,metric)+'</span> \u2192 Jun MTD <span class="iv hi">'+fmtV(jv,metric)+'</span> <span class="badge" style="background:'+badgeBg(jv,mv)+';color:'+badgeClr(jv,mv)+'">'+p1s+'</span><br>'+mood});
 
-      // ── 2. Best L1 category
-      var bestL1 = null, bestPct = -Infinity;
-      L1_CATS.forEach(function(cat) {
-        var lmv = l1Val(cat, cluster, 'may_mtd', metric);
-        var ljv = l1Val(cat, cluster, 'jun_mtd', metric);
-        if (lmv > 0) { var p = (ljv-lmv)/lmv*100; if (p > bestPct) { bestPct=p; bestL1={cat:cat,mv:lmv,jv:ljv,p:p}; } }
-      });
-      if (bestL1) {
-        insights.push('🌟 <strong>Best category</strong>: '+bestL1.cat+' grew from '+fmtV(bestL1.mv,metric)+' → '+fmtV(bestL1.jv,metric)+' (+'+bestL1.p.toFixed(1)+'% MoM).'+(bestL1.p>10?' Strong momentum — maintain stocking & promos.':' Consistent performer.'));
+      /* 2. CATEGORY HEAT MAP */
+      var catData=L1_CATS.map(function(cat){
+        var lmv=l1Val(cat,cluster,'may_mtd',metric);
+        var ljv=l1Val(cat,cluster,'jun_mtd',metric);
+        return{cat:cat,mv:lmv,jv:ljv,p:pctNum(ljv,lmv),abs:ljv-lmv};
+      }).filter(function(d){return d.mv>0;}).sort(function(a,b){return b.p-a.p;});
+
+      if(catData.length){
+        var best=catData[0],worst=catData[catData.length-1];
+        var grow=catData.filter(function(d){return d.p>0;}).length;
+        var bars=catData.map(function(d){
+          var w=Math.max(4,Math.min(80,Math.abs(d.p)*3));
+          var clr=d.p>=0?'#22c55e':'#ef4444';
+          return '<div style="display:flex;align-items:center;gap:6px;margin:2px 0">'
+            +'<span style="width:90px;font-size:10px;color:#94a3b8;text-align:right">'+d.cat+'</span>'
+            +'<span style="width:'+w+'px;height:6px;background:'+clr+';border-radius:3px;display:inline-block"></span>'
+            +'<span style="font-size:10px;color:'+clr+';font-weight:700">'+(d.p>=0?'+':'')+d.p.toFixed(1)+'%</span>'
+            +'</div>';
+        }).join('');
+        ins.push({icon:'\uD83C\uDF21\uFE0F',color:'#a78bfa',
+          title:'Category Heat Map',
+          body:'<strong>'+grow+' of '+catData.length+' categories growing</strong>. '
+            +'Best: <span class="iv">'+best.cat+'</span> (+'+best.p.toFixed(1)+'%) &nbsp; Worst: <span class="iv" style="color:#f87171">'+worst.cat+'</span> ('+worst.p.toFixed(1)+'%)<br>'
+            +'<div style="margin-top:8px">'+bars+'</div>'});
       }
 
-      // ── 3. Worst L1 category
-      var worstL1 = null, worstPct = Infinity;
-      L1_CATS.forEach(function(cat) {
-        var lmv = l1Val(cat, cluster, 'may_mtd', metric);
-        var ljv = l1Val(cat, cluster, 'jun_mtd', metric);
-        if (lmv > 0) { var p = (ljv-lmv)/lmv*100; if (p < worstPct) { worstPct=p; worstL1={cat:cat,mv:lmv,jv:ljv,p:p}; } }
-      });
-      if (worstL1 && worstL1.p < 0) {
-        insights.push('⚠️ <strong>Risk category</strong>: '+worstL1.cat+' declined '+worstL1.p.toFixed(1)+'% (May '+fmtV(worstL1.mv,metric)+' → Jun '+fmtV(worstL1.jv,metric)+'). Investigate demand, pricing or supply issues.');
+      /* 3. STORE PERFORMANCE DISTRIBUTION */
+      var storeData=sites.map(function(sid){
+        var smv=siteVal(sid,'ALL','ALL','may_mtd',metric);
+        var sjv=siteVal(sid,'ALL','ALL','jun_mtd',metric);
+        return{name:D1[sid].name,cluster:D1[sid].cluster,mv:smv,jv:sjv,p:pctNum(sjv,smv)};
+      }).filter(function(d){return d.mv>0;}).sort(function(a,b){return b.p-a.p;});
+
+      if(storeData.length){
+        var topN=storeData.slice(0,3),botN=storeData.slice(-3).reverse();
+        var growStores=storeData.filter(function(d){return d.p>0;}).length;
+        ins.push({icon:'\uD83C\uDFC6',color:'#fbbf24',
+          title:'Store Performance Distribution',
+          body:'<strong>'+growStores+' of '+storeData.length+' stores growing</strong> MoM.'
+            +'<div style="display:flex;gap:16px;margin-top:8px">'
+            +'<div><div style="font-size:10px;color:#4ade80;font-weight:700;margin-bottom:4px">\u2B06 TOP PERFORMERS</div>'
+            +topN.map(function(s,i){return'<div style="font-size:11px;color:#e2e8f0;margin:2px 0">'+(i+1)+'. <strong>'+s.name+'</strong> <span style="color:#4ade80">+'+s.p.toFixed(1)+'%</span></div>';}).join('')+'</div>'
+            +'<div><div style="font-size:10px;color:#f87171;font-weight:700;margin-bottom:4px">\u2B07 NEEDS ATTENTION</div>'
+            +botN.map(function(s,i){return'<div style="font-size:11px;color:#e2e8f0;margin:2px 0">'+(i+1)+'. <strong>'+s.name+'</strong> <span style="color:#f87171">'+s.p.toFixed(1)+'%</span></div>';}).join('')+'</div>'
+            +'</div>'});
       }
 
-      // ── 4. Top store by MoM %
-      var topStore = null, topPct = -Infinity;
-      allSiteIds().forEach(function(sid) {
-        if (cluster !== 'ALL' && D1[sid].cluster !== cluster) return;
-        var smv = siteVal(sid,'ALL','ALL','may_mtd',metric);
-        var sjv = siteVal(sid,'ALL','ALL','jun_mtd',metric);
-        if (smv > 0) { var sp = (sjv-smv)/smv*100; if (sp > topPct) { topPct=sp; topStore={name:D1[sid].name,cluster:D1[sid].cluster,mv:smv,jv:sjv,p:sp}; } }
+      /* 4. CHANNEL INTELLIGENCE */
+      var posM=0,posJ=0,ecomM=0,ecomJ=0;
+      sites.forEach(function(sid){
+        posM+=siteVal(sid,'POS','ALL','may_mtd',metric);
+        posJ+=siteVal(sid,'POS','ALL','jun_mtd',metric);
+        ecomM+=siteVal(sid,'ECOM','ALL','may_mtd',metric);
+        ecomJ+=siteVal(sid,'ECOM','ALL','jun_mtd',metric);
       });
-      if (topStore) {
-        insights.push('🏆 <strong>Top store</strong>: '+topStore.name+' ('+topStore.cluster+') — Jun MTD '+fmtV(topStore.jv,metric)+' ('+pctChgStr(topStore.jv,topStore.mv)+' MoM). Benchmark best practices from this store.');
+      var totJ=posJ+ecomJ;
+      if(totJ>0){
+        var posShare=(posJ/totJ*100).toFixed(0),ecomShare=(ecomJ/totJ*100).toFixed(0);
+        var posP=pctChgStr(posJ,posM),ecomP=pctChgStr(ecomJ,ecomM);
+        var posW=Math.round(posJ/totJ*160),ecomW=160-posW;
+        ins.push({icon:'\uD83D\uDCCA',color:'#38bdf8',
+          title:'Channel Intelligence',
+          body:'<div style="display:flex;border-radius:6px;overflow:hidden;height:20px;margin-bottom:8px">'
+            +'<div style="width:'+posW+'px;background:#2563eb;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff">POS '+posShare+'%</div>'
+            +'<div style="width:'+ecomW+'px;background:#7c3aed;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff">ECOM '+ecomShare+'%</div>'
+            +'</div>'
+            +'<strong>POS</strong>: '+fmtV(posM,metric)+' \u2192 '+fmtV(posJ,metric)+' <span class="badge" style="background:'+badgeBg(posJ,posM)+';color:'+badgeClr(posJ,posM)+'">'+posP+'</span>'
+            +'&nbsp;&nbsp;<strong>ECOM</strong>: '+fmtV(ecomM,metric)+' \u2192 '+fmtV(ecomJ,metric)+' <span class="badge" style="background:'+badgeBg(ecomJ,ecomM)+';color:'+badgeClr(ecomJ,ecomM)+'">'+ecomP+'</span><br>'
+            +(ecomJ/totJ>0.35?'\uD83D\uDCA1 ECOM share is strong \u2014 double down on digital marketing.':'\uD83D\uDCA1 ECOM has headroom to grow \u2014 push online promotions.')});
       }
 
-      // ── 5. Most declining store
-      var botStore = null, botPct = Infinity;
-      allSiteIds().forEach(function(sid) {
-        if (cluster !== 'ALL' && D1[sid].cluster !== cluster) return;
-        var smv = siteVal(sid,'ALL','ALL','may_mtd',metric);
-        var sjv = siteVal(sid,'ALL','ALL','jun_mtd',metric);
-        if (smv > 0) { var sp = (sjv-smv)/smv*100; if (sp < botPct) { botPct=sp; botStore={name:D1[sid].name,cluster:D1[sid].cluster,mv:smv,jv:sjv,p:sp}; } }
-      });
-      if (botStore && botStore.p < 0) {
-        insights.push('🔴 <strong>Needs action</strong>: '+botStore.name+' ('+botStore.cluster+') declining '+botStore.p.toFixed(1)+'% (May '+fmtV(botStore.mv,metric)+' → Jun '+fmtV(botStore.jv,metric)+'). Escalate to cluster manager for immediate review.');
+      /* 5. CLUSTER LEAGUE TABLE (only for ALL view) */
+      if(cluster==='ALL'){
+        var clData=OI_CLUSTERS_LIST.map(function(cl){
+          var cmv=clusterVal(cl,'may_mtd',metric),cjv=clusterVal(cl,'jun_mtd',metric);
+          var stCnt=allSiteIds().filter(function(s){return D1[s].cluster===cl;}).length;
+          return{name:cl,mv:cmv,jv:cjv,p:pctNum(cjv,cmv),stores:stCnt};
+        }).sort(function(a,b){return b.p-a.p;});
+        var maxAbs=Math.max.apply(null,clData.map(function(d){return Math.abs(d.p);}));
+        var clRows=clData.map(function(d,i){
+          var w=Math.max(4,Math.round(Math.abs(d.p)/maxAbs*120));
+          var clr=d.p>=0?'#22c55e':'#ef4444';
+          var medal=i===0?'\uD83E\uDD47':i===1?'\uD83E\uDD48':i===2?'\uD83E\uDD49':'  ';
+          return'<div style="display:flex;align-items:center;gap:8px;margin:3px 0">'
+            +'<span style="width:16px;font-size:12px">'+medal+'</span>'
+            +'<span style="width:90px;font-size:11px;color:#e2e8f0;font-weight:600">'+d.name+'</span>'
+            +'<span style="width:'+w+'px;height:8px;background:'+clr+';border-radius:4px;display:inline-block"></span>'
+            +'<span style="font-size:11px;color:'+clr+';font-weight:800">'+(d.p>=0?'+':'')+d.p.toFixed(1)+'%</span>'
+            +'<span style="font-size:10px;color:#475569">'+fmtV(d.jv,metric)+'</span>'
+            +'</div>';
+        }).join('');
+        ins.push({icon:'\uD83C\uDFC5',color:'#f59e0b',
+          title:'Cluster League Table',
+          body:clRows+'<div style="margin-top:6px;font-size:11px;color:#64748b">Leader: <strong style="color:#fbbf24">'+clData[0].name+'</strong> +'+clData[0].p.toFixed(1)+'% &nbsp;|&nbsp; Laggard: <strong style="color:#f87171">'+clData[clData.length-1].name+'</strong> '+clData[clData.length-1].p.toFixed(1)+'%</div>'});
       }
 
-      // ── 6. Channel split (POS vs ECOM)
-      var sites = cluster === 'ALL' ? allSiteIds() : allSiteIds().filter(function(s){ return D1[s].cluster===cluster; });
-      var posJ=0, ecomJ=0;
-      sites.forEach(function(sid) {
-        posJ  += siteVal(sid,'POS','ALL','jun_mtd',metric);
-        ecomJ += siteVal(sid,'ECOM','ALL','jun_mtd',metric);
-      });
-      var total = posJ+ecomJ;
-      if (total > 0) {
-        insights.push('📊 <strong>Channel split</strong> (Jun MTD): POS '+fmtV(posJ,metric)+' ('+(posJ/total*100).toFixed(0)+'%) vs ECOM '+fmtV(ecomJ,metric)+' ('+(ecomJ/total*100).toFixed(0)+'%). '+(ecomJ/total>0.3?'ECOM growing well — invest in digital.':'POS dominant — ECOM has growth opportunity.'));
-      }
-
-      // ── 7. Cluster champion (only for ALL view)
-      if (cluster === 'ALL') {
-        var clusters = ['Ananth','Mahesh','Alagiri','Hinduraj P','Hari Govindan'];
-        var champCluster = null, champPct = -Infinity;
-        clusters.forEach(function(cl) {
-          var cmv = clusterVal(cl,'may_mtd',metric);
-          var cjv = clusterVal(cl,'jun_mtd',metric);
-          if (cmv>0) { var cp=(cjv-cmv)/cmv*100; if(cp>champPct){champPct=cp; champCluster={name:cl,mv:cmv,jv:cjv,p:cp};} }
+      /* 6. GROWTH MOMENTUM SIGNAL (3-month trend using D1) */
+      var m3=clusterVal(cluster,'mar_full',metric);
+      var m4=clusterVal(cluster,'apr_full',metric);
+      var m5=clusterVal(cluster,'may_full',metric);
+      if(m3>0&&m4>0&&m5>0){
+        var t1=pctNum(m4,m3),t2=pctNum(m5,m4),t3=pctNum(jv,mv);
+        var maxV=Math.max(m3,m4,m5,mv,jv);
+        var pts=[m3,m4,m5,mv,jv];
+        var lbls=['Mar','Apr','May F','May M','Jun M'];
+        var svgW=260,svgH=50;
+        var svgPts=pts.map(function(v,i){
+          var x=10+i*(svgW-20)/4;
+          var y=svgH-5-Math.round((v/maxV)*(svgH-15));
+          return{x:x,y:y,v:v};
         });
-        if (champCluster) {
-          insights.push('🥇 <strong>Best cluster</strong>: '+champCluster.name+' leads with '+champCluster.p.toFixed(1)+'% MoM growth (Jun MTD '+fmtV(champCluster.jv,metric)+'). Share playbook across other clusters.');
-        }
+        var polyline=svgPts.map(function(p){return p.x+','+p.y;}).join(' ');
+        var dots=svgPts.map(function(p,i){
+          var clr=i===svgPts.length-1?'#a78bfa':'#475569';
+          return'<circle cx="'+p.x+'" cy="'+p.y+'" r="3" fill="'+clr+'"/>'
+            +'<text x="'+p.x+'" y="'+(svgH+4)+'" text-anchor="middle" style="font-size:7px;fill:#64748b">'+lbls[i]+'</text>';
+        }).join('');
+        var trendDir=t3>t2&&t2>t1?'Accelerating \uD83D\uDE80':t3<t2&&t2<t1?'Decelerating \u26A0\uFE0F':t3>0?'Positive \u2705':'Negative \uD83D\uDD34';
+        ins.push({icon:'\uD83D\uDCC8',color:'#818cf8',
+          title:'3-Month Growth Momentum',
+          body:'Trend: <strong>'+trendDir+'</strong> &nbsp;|&nbsp; Mar\u2192Apr: <span style="color:'+(t1>=0?'#4ade80':'#f87171')+'">'+(t1>=0?'+':'')+t1.toFixed(1)+'%</span>'
+            +' &nbsp; Apr\u2192May: <span style="color:'+(t2>=0?'#4ade80':'#f87171')+'">'+(t2>=0?'+':'')+t2.toFixed(1)+'%</span>'
+            +' &nbsp; May\u2192Jun: <span style="color:'+(t3>=0?'#4ade80':'#f87171')+'">'+(t3>=0?'+':'')+t3.toFixed(1)+'%</span>'
+            +'<div style="margin-top:8px"><svg width="'+svgW+'" height="'+(svgH+14)+'" style="overflow:visible">'
+            +'<polyline points="'+polyline+'" fill="none" stroke="#6366f1" stroke-width="2" stroke-linejoin="round"/>'
+            +'<polyline points="'+polyline+'" fill="url(#grad)" stroke="none"/>'
+            +'<defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6366f1" stop-opacity=".3"/><stop offset="100%" stop-color="#6366f1" stop-opacity="0"/></linearGradient></defs>'
+            +dots+'</svg></div>'});
       }
 
-      var html = insights.map(function(line) {
-        return '<div style="padding:7px 2px;border-bottom:1px solid #1e293b;font-size:12px;line-height:1.7;color:#e2e8f0">'
-          + line.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>') + '</div>';
-      }).join('');
-      el.innerHTML = '<div style="padding:4px">'+html+'</div>';
-
-    } catch(e) {
-      el.innerHTML = '<div style="color:#f87171;font-size:11px;padding:8px">⚠️ '+e.message+'</div>';
-      el.dataset.loaded = '';
-    }
-  }, 10);
-}
-
-/* ══ OPEN INSIGHTS — NLP + DuckDB-WASM ══ */
-var OI_CLUSTERS = ['Ananth','Mahesh','Alagiri','Hinduraj P','Hari Govindan'];
-var OI_L1       = ['Fruits','Vegetables','FMCG Food','FMCG Non Food','Staples','Poultry','KPN Cafe','Others'];
-
-function oiDetect(q, list) {
-  return list.filter(function(x){ return q.toLowerCase().indexOf(x.toLowerCase()) >= 0; });
-}
-function oiMetric(q) {
-  var ql = q.toLowerCase();
-  if (/\bnob\b|order/.test(ql)) return 'nob';
-  if (/\bqty\b|quantity/.test(ql)) return 'qty';
-  return 'gmv';
-}
-function oiLimit(q) {
-  var m = q.match(/\b(\d+)\b/);
-  if (m) { var n=parseInt(m[1]); if(n>=1&&n<=50) return n; }
-  return 10;
-}
-function oiIntent(q) {
-  var ql = q.toLowerCase();
-  if (/declin|degrow|drop|worst|bottom|lowest|poor|loss/.test(ql)) return 'degrow';
-  if (/ksin|sku|product|item/.test(ql)) return 'ksin';
-  if (/compar|vs |versus/.test(ql)) return 'compare';
-  if (/cluster|zone/.test(ql)) return 'cluster';
-  if (/store|branch|outlet/.test(ql)) return 'store';
-  return 'top';
-}
-
-/* ── Pure JS fallback query engine (no DuckDB-WASM needed) ── */
-function oiQueryJS(q) {
-  var metric  = oiMetric(q);
-  var intent  = oiIntent(q);
-  var limit   = oiLimit(q);
-  var clusters = oiDetect(q, OI_CLUSTERS);
-  var l1s      = oiDetect(q, OI_L1);
-  var order    = intent === 'degrow' ? 1 : -1;
-  var label    = intent === 'degrow' ? 'Bottom' : 'Top';
-  var sites    = allSiteIds().filter(function(sid) {
-    return clusters.length === 0 || clusters.indexOf(D1[sid].cluster) >= 0;
-  });
-
-  // ── KSIN query
-  if (intent === 'ksin' || /ksin|sku|product|item/.test(q.toLowerCase()) || l1s.length) {
-    var ksinRows = [];
-    sites.forEach(function(sid) {
-      if (!D2[sid]) return;
-      var l1map = D2[sid];
-      Object.keys(l1map).forEach(function(l1) {
-        if (l1s.length && l1s.indexOf(l1) < 0) return;
-        Object.keys(l1map[l1]).forEach(function(l2) {
-          Object.keys(l1map[l1][l2]).forEach(function(ksin) {
-            var kd = l1map[l1][l2][ksin];
-            var mv = (kd.m||{})[metric==='nob'?'N':'G'] || 0;
-            var jv = (kd.j||{})[metric==='nob'?'N':'G'] || 0;
-            ksinRows.push({ name:kd.t||ksin, ksin:ksin, store:D1[sid].name,
-              cluster:D1[sid].cluster, l1:l1, l2:l2, mv:mv, jv:jv, delta:jv-mv });
+      /* 7. TOP KSIN ALERT */
+      var topKSINs=[],botKSINs=[];
+      Object.keys(D3).forEach(function(l1){
+        Object.keys(D3[l1]).forEach(function(l2){
+          Object.keys(D3[l1][l2]).forEach(function(ksin){
+            var kd=D3[l1][l2][ksin];
+            var kmetric=metric==='nob'?{mv:kd.m.N||0,jv:kd.j.N||0}:{mv:kd.m.G||0,jv:kd.j.G||0};
+            if(kmetric.mv>0){
+              var kp=pctNum(kmetric.jv,kmetric.mv);
+              var rec={name:kd.t,l1:l1,mv:kmetric.mv,jv:kmetric.jv,p:kp};
+              topKSINs.push(rec); botKSINs.push(rec);
+            }
           });
         });
       });
-    });
-    ksinRows.sort(function(a,b){ return order*(b.delta-a.delta); });
-    ksinRows = ksinRows.slice(0, limit);
-    return {
-      title: label+' '+limit+' KSINs'+(l1s.length?' in '+l1s.join(', '):'')+(clusters.length?' — '+clusters.join(', '):''),
-      type: 'ksin', rows: ksinRows, metric: metric
-    };
-  }
+      topKSINs.sort(function(a,b){return b.p-a.p;}); topKSINs=topKSINs.slice(0,5);
+      botKSINs.sort(function(a,b){return a.p-b.p;}); botKSINs=botKSINs.slice(0,5);
+      ins.push({icon:'\uD83D\uDD0D',color:'#34d399',
+        title:'KSIN Spotlight — Chain-Wide',
+        body:'<div style="display:flex;gap:16px">'
+          +'<div><div style="font-size:10px;color:#4ade80;font-weight:700;margin-bottom:4px">\uD83D\uDE80 FAST MOVERS</div>'
+          +topKSINs.map(function(k){return'<div style="font-size:11px;margin:2px 0;color:#e2e8f0"><span style="color:#4ade80;font-weight:700">+'+k.p.toFixed(0)+'%</span> '+k.name.slice(0,28)+'</div>';}).join('')+'</div>'
+          +'<div><div style="font-size:10px;color:#f87171;font-weight:700;margin-bottom:4px">\uD83D\uDEA8 SLOW MOVERS</div>'
+          +botKSINs.map(function(k){return'<div style="font-size:11px;margin:2px 0;color:#e2e8f0"><span style="color:#f87171;font-weight:700">'+k.p.toFixed(0)+'%</span> '+k.name.slice(0,28)+'</div>';}).join('')+'</div>'
+          +'</div>'});
 
-  // ── CLUSTER comparison
-  if (intent === 'cluster' || intent === 'compare') {
-    var clList = clusters.length ? clusters : OI_CLUSTERS;
-    var clRows = clList.map(function(cl) {
-      var clSites = allSiteIds().filter(function(s){ return D1[s].cluster===cl; });
-      var mv = clSites.reduce(function(s,sid){ return s+siteVal(sid,'ALL','ALL','may_mtd',metric); },0);
-      var jv = clSites.reduce(function(s,sid){ return s+siteVal(sid,'ALL','ALL','jun_mtd',metric); },0);
-      return { name:cl, stores:clSites.length, mv:mv, jv:jv };
-    });
-    clRows.sort(function(a,b){ return order*((b.jv-b.mv)/b.mv-(a.jv-a.mv)/a.mv); });
-    return { title:'Cluster Performance — May MTD vs Jun MTD · '+metric.toUpperCase(), type:'cluster', rows:clRows, metric:metric };
-  }
+      /* RENDER */
+      var style='<style>'
+        +'.ins-card{background:#0f0c29;border:1px solid #1e1b4b;border-radius:10px;padding:12px 14px;margin-bottom:8px}'
+        +'.ins-hdr{display:flex;align-items:center;gap:8px;margin-bottom:6px}'
+        +'.ins-icon{font-size:18px;line-height:1}'
+        +'.ins-title{font-size:12px;font-weight:800;color:#a78bfa;letter-spacing:.3px;text-transform:uppercase}'
+        +'.ins-body{font-size:12px;color:#cbd5e1;line-height:1.7}'
+        +'.iv{font-weight:700;color:#e2e8f0}'
+        +'.iv.hi{color:#a78bfa}'
+        +'.badge{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:800}'
+        +'@keyframes spin{to{transform:rotate(360deg)}}'
+        +'</style>';
 
-  // ── STORE ranking (default)
-  var storeRows = sites.map(function(sid) {
-    var mv = siteVal(sid,'ALL','ALL','may_mtd',metric);
-    var jv = siteVal(sid,'ALL','ALL','jun_mtd',metric);
-    return { name:D1[sid].name, cluster:D1[sid].cluster, mv:mv, jv:jv };
-  }).filter(function(r){ return r.mv>0; });
-  storeRows.sort(function(a,b){ return order*((b.jv-b.mv)/b.mv-(a.jv-a.mv)/a.mv); });
-  storeRows = storeRows.slice(0, limit);
-  return {
-    title: label+' '+limit+' Stores by MoM % · '+metric.toUpperCase()+(clusters.length?' — '+clusters.join(', '):''),
-    type:'store', rows:storeRows, metric:metric
-  };
+      var html=style+ins.map(function(ins){
+        return'<div class="ins-card">'
+          +'<div class="ins-hdr">'
+          +'<span class="ins-icon">'+ins.icon+'</span>'
+          +'<span class="ins-title">'+ins.title+'</span>'
+          +'<span style="margin-left:auto;width:4px;height:24px;background:'+ins.color+';border-radius:2px;display:inline-block"></span>'
+          +'</div>'
+          +'<div class="ins-body">'+ins.body+'</div>'
+          +'</div>';
+      }).join('');
+
+      el.innerHTML=html;
+    }catch(e){
+      el.innerHTML='<div style="color:#f87171;font-size:11px;padding:8px">\u26A0\uFE0F '+e.message+'</div>';
+      el.dataset.loaded='';
+    }
+  },20);
 }
 
-function oiRenderResult(data) {
-  var resEl = document.getElementById('oiResult');
-  if (!resEl) return;
-  var rows = data.rows || [];
-  if (!rows.length) { resEl.innerHTML='<div class="oi-empty">No results found.</div>'; return; }
-  var metric = data.metric;
+/* ════════════════════════════════════════════════════════════
+   OPEN INSIGHTS — Natural Language Query Engine
+   Understands product names, categories, clusters, periods.
+   ════════════════════════════════════════════════════════════ */
+function oiDetectPeriods(q){
+  var ql=q.toLowerCase();
+  if(/3\s*month|three\s*month|last\s*3|last\s*three|trend|history|over\s*time|all\s*month/.test(ql))return OI_3M;
+  if(/4\s*month|four\s*month|all\s*period/.test(ql))return OI_ALL;
+  for(var kw in OI_PERIODS){if(ql.indexOf(kw)>=0)return[OI_PERIODS[kw]];}
+  return[{key:'jun_mtd',label:'Jun MTD'}];
+}
+function oiMetric(q){var ql=q.toLowerCase();if(/\bnob\b|order/.test(ql))return'nob';if(/\bqty\b|quantity|unit/.test(ql))return'qty';return'gmv';}
+function oiLimit(q){var m=q.match(/\b(\d+)\b/);if(m){var n=parseInt(m[1]);if(n>=1&&n<=100)return n;}return 10;}
+function oiDetect(q,list){return list.filter(function(x){return q.toLowerCase().indexOf(x.toLowerCase())>=0;});}
+function oiIntent(q){
+  var ql=q.toLowerCase();
+  if(/declin|degrow|drop|worst|bottom|lowest|poor|loss|fall/.test(ql))return'degrow';
+  if(/compar|vs |versus/.test(ql))return'compare';
+  if(/cluster|zone/.test(ql))return'cluster';
+  if(/store|branch|outlet/.test(ql))return'store';
+  if(/categor|l1|department/.test(ql))return'l1';
+  return'top';
+}
 
-  var html = '<div class="oi-result-hdr">📊 '+data.title
-    +'<span style="margin-left:auto;font-size:11px;font-weight:400;color:#64748b">'+rows.length+' results</span></div>';
-  html += '<div style="overflow-x:auto"><table class="oi-table">';
+function oiSearchProducts(kw){
+  var k=kw.toLowerCase(),res=[];
+  Object.keys(D3).forEach(function(l1){
+    Object.keys(D3[l1]).forEach(function(l2){
+      Object.keys(D3[l1][l2]).forEach(function(ksin){
+        var kd=D3[l1][l2][ksin];
+        if((kd.t||'').toLowerCase().indexOf(k)>=0)
+          res.push({ksin:ksin,title:kd.t,l1:l1,l2:l2,mv:kd.m.G||0,jv:kd.j.G||0,m_nob:kd.m.N||0,j_nob:kd.j.N||0});
+      });
+    });
+  });
+  return res;
+}
 
-  if (data.type === 'ksin') {
-    html += '<thead><tr><th>#</th><th>Product</th><th>KSIN</th><th>Store</th><th>L2</th><th>May MTD</th><th>Jun MTD</th><th>Δ</th><th>%</th></tr></thead><tbody>';
-    rows.forEach(function(r,i) {
-      var clr=badgeClr(r.jv,r.mv); var bg=badgeBg(r.jv,r.mv); var p=pctChgStr(r.jv,r.mv);
-      html += '<tr>'
+function oiQueryJS(q){
+  var metric=oiMetric(q),intent=oiIntent(q),limit=oiLimit(q);
+  var clusters=oiDetect(q,OI_CLUSTERS_LIST),l1s=oiDetect(q,OI_L1_LIST);
+  var periods=oiDetectPeriods(q),isMulti=periods.length>1;
+  var order=/degrow|declin|drop|worst|bottom|lowest|poor/.test(q.toLowerCase())?1:-1;
+  var label=order===1?'Bottom':'Top';
+  var sites=allSiteIds().filter(function(s){return!clusters.length||clusters.indexOf(D1[s].cluster)>=0;});
+
+  /* Product keyword search */
+  var STOP=['what','is','the','in','of','for','show','me','give','top','bottom','best','worst',
+    'last','this','month','months','sales','gmv','nob','qty','all','by','and','or','a','an',
+    'vs','over','time','trend','how','much','many','does','did','compare','across','3','4','5',
+    'mar','apr','may','jun','march','april','june','full','mtd','period','history','ksin','sku',
+    'product','products','cluster','store','category','growing','declining','which','are'];
+  var words=q.toLowerCase().split(/[\s,?!]+/).filter(function(w){
+    return w.length>2&&STOP.indexOf(w)<0
+      &&OI_CLUSTERS_LIST.map(function(c){return c.toLowerCase();}).indexOf(w)<0
+      &&OI_L1_LIST.map(function(l){return l.toLowerCase();}).indexOf(w)<0;
+  });
+
+  if(words.length>0){
+    var matches=[];
+    words.forEach(function(w){
+      oiSearchProducts(w).forEach(function(p){
+        if(!matches.filter(function(x){return x.ksin===p.ksin;}).length)matches.push(p);
+      });
+    });
+    if(matches.length>0){
+      var kmet=metric==='nob'?function(k){return{mv:k.m_nob,jv:k.j_nob};}:function(k){return{mv:k.mv,jv:k.jv};};
+      matches.sort(function(a,b){return kmet(b).jv-kmet(a).jv;});
+      matches=matches.slice(0,Math.min(limit,20));
+      if(isMulti){
+        var rows=matches.map(function(kd){
+          var row={ksin:kd.ksin,title:kd.title,l1:kd.l1,l2:kd.l2};
+          periods.forEach(function(p){
+            var t=0;
+            if(p.key==='may_mtd'||p.key==='jun_mtd'){
+              allSiteIds().forEach(function(sid){
+                if(clusters.length&&clusters.indexOf(D1[sid].cluster)<0)return;
+                var kdata=D2[sid]&&D2[sid][kd.l1]&&D2[sid][kd.l1][kd.l2]&&D2[sid][kd.l1][kd.l2][kd.ksin];
+                if(!kdata)return;
+                var src=p.key==='may_mtd'?kdata.m:kdata.j;
+                t+=(src||{})[metric==='nob'?'N':'G']||0;
+              });
+            } else {
+              // Use D1 L2 aggregate for older periods
+              allSiteIds().forEach(function(sid){
+                if(clusters.length&&clusters.indexOf(D1[sid].cluster)<0)return;
+                ['POS','ECOM'].forEach(function(ch){
+                  var pdata=D1[sid]&&D1[sid][ch]&&D1[sid][ch][kd.l1]&&D1[sid][ch][kd.l1][kd.l2]&&D1[sid][ch][kd.l1][kd.l2][p.key];
+                  if(pdata)t+=(metric==='nob'?pdata.N:metric==='qty'?pdata.Q:pdata.G)||0;
+                });
+              });
+              row._isL2=true;
+            }
+            row[p.key]=t;
+          });
+          return row;
+        });
+        return{title:'Trend: "'+words.join(' ')+'"'+(clusters.length?' \u2014 '+clusters.join(', '):''),type:'trend',rows:rows,periods:periods,metric:metric,isL2Note:rows[0]&&rows[0]._isL2};
+      }
+      var simpleRows=matches.map(function(kd){var km=kmet(kd);return{name:kd.title,ksin:kd.ksin,l1:kd.l1,l2:kd.l2,store:'All Stores',mv:km.mv,jv:km.jv,delta:km.jv-km.mv};});
+      simpleRows.sort(function(a,b){return order*(b.delta-a.delta);});
+      return{title:(label+' products matching "'+words.join(' ')+'"'),type:'ksin',rows:simpleRows,metric:metric};
+    }
+  }
+
+  /* L1 multi-period trend */
+  if(l1s.length&&isMulti){
+    var l1rows=l1s.map(function(cat){
+      var row={name:cat};
+      periods.forEach(function(p){row[p.key]=sites.reduce(function(s,sid){return s+siteVal(sid,'ALL',cat,p.key,metric);},0);});
+      return row;
+    });
+    var l2set={};
+    if(l1s.length===1){
+      sites.forEach(function(sid){['POS','ECOM'].forEach(function(ch){if(D1[sid]&&D1[sid][ch]&&D1[sid][ch][l1s[0]])Object.keys(D1[sid][ch][l1s[0]]).forEach(function(l2){l2set[l2]=true;});});});
+      var l2rows=Object.keys(l2set).map(function(l2){
+        var row={name:l2};
+        periods.forEach(function(p){row[p.key]=sites.reduce(function(s,sid){var t=0;['POS','ECOM'].forEach(function(ch){var pd=D1[sid]&&D1[sid][ch]&&D1[sid][ch][l1s[0]]&&D1[sid][ch][l1s[0]][l2]&&D1[sid][ch][l1s[0]][l2][p.key];if(pd)t+=(metric==='nob'?pd.N:metric==='qty'?pd.Q:pd.G)||0;});return s+t;},0);});
+        return row;
+      }).sort(function(a,b){return(b[periods[periods.length-1].key]||0)-(a[periods[periods.length-1].key]||0);}).slice(0,10);
+    }
+    return{title:(periods.length===3?'Last 3 Months':'All Periods')+' \u2014 '+l1s.join(', '),type:'trend',rows:l1rows,l2rows:l2set&&Object.keys(l2set).length?l2rows:null,periods:periods,metric:metric};
+  }
+
+  /* Cluster trend */
+  if((intent==='cluster'||intent==='compare')&&isMulti){
+    var crows=OI_CLUSTERS_LIST.map(function(cl){
+      var row={name:cl,stores:allSiteIds().filter(function(s){return D1[s].cluster===cl;}).length};
+      periods.forEach(function(p){row[p.key]=clusterVal(cl,p.key,metric);});
+      return row;
+    });
+    return{title:'Cluster Trend \u2014 '+(periods.length===3?'Last 3 Months':'All Periods'),type:'trend',isCl:true,rows:crows,periods:periods,metric:metric};
+  }
+
+  /* Cluster comparison */
+  if(intent==='cluster'||intent==='compare'){
+    var clRows=(clusters.length?clusters:OI_CLUSTERS_LIST).map(function(cl){
+      return{name:cl,stores:allSiteIds().filter(function(s){return D1[s].cluster===cl;}).length,mv:clusterVal(cl,'may_mtd',metric),jv:clusterVal(cl,'jun_mtd',metric)};
+    }).sort(function(a,b){return order*((b.jv-b.mv)/b.mv-(a.jv-a.mv)/a.mv);});
+    return{title:'Cluster Performance \u00b7 '+metric.toUpperCase(),type:'cluster',rows:clRows,metric:metric};
+  }
+
+  /* Store ranking */
+  if(intent==='store'){
+    var sRows=sites.map(function(sid){return{name:D1[sid].name,cluster:D1[sid].cluster,mv:siteVal(sid,'ALL','ALL','may_mtd',metric),jv:siteVal(sid,'ALL','ALL','jun_mtd',metric)};}).filter(function(r){return r.mv>0;});
+    sRows.sort(function(a,b){return order*((b.jv-b.mv)/b.mv-(a.jv-a.mv)/a.mv);});
+    return{title:label+' '+limit+' Stores \u00b7 '+metric.toUpperCase(),type:'store',rows:sRows.slice(0,limit),metric:metric};
+  }
+
+  /* L1 single period - store breakdown */
+  if(l1s.length){
+    var storeL1=sites.map(function(sid){
+      return{name:D1[sid].name,cluster:D1[sid].cluster,mv:siteVal(sid,'ALL',l1s[0],'may_mtd',metric),jv:siteVal(sid,'ALL',l1s[0],periods[0].key,metric)};
+    }).filter(function(r){return r.jv>0||r.mv>0;});
+    storeL1.sort(function(a,b){return order*(b.jv-a.jv);});
+    return{title:label+' '+limit+' Stores \u2014 '+l1s.join(', ')+' ('+periods[0].label+')',type:'store',rows:storeL1.slice(0,limit),metric:metric};
+  }
+
+  /* Default: KSIN ranking */
+  var ksinRows=[];
+  allSiteIds().forEach(function(sid){
+    if(clusters.length&&clusters.indexOf(D1[sid].cluster)<0)return;
+    if(!D2[sid])return;
+    Object.keys(D2[sid]).forEach(function(l1){
+      if(l1s.length&&l1s.indexOf(l1)<0)return;
+      Object.keys(D2[sid][l1]).forEach(function(l2){
+        Object.keys(D2[sid][l1][l2]).forEach(function(ksin){
+          var kd=D2[sid][l1][l2][ksin];
+          var mv=(kd.m||{})[metric==='nob'?'N':'G']||0;
+          var jv=(kd.j||{})[metric==='nob'?'N':'G']||0;
+          ksinRows.push({name:kd.t||ksin,ksin:ksin,store:D1[sid].name,cluster:D1[sid].cluster,l1:l1,l2:l2,mv:mv,jv:jv,delta:jv-mv});
+        });
+      });
+    });
+  });
+  ksinRows.sort(function(a,b){return order*(b.delta-a.delta);});
+  return{title:label+' '+limit+' KSINs'+(l1s.length?' in '+l1s.join(', '):'')+(clusters.length?' \u2014 '+clusters.join(', '):''),type:'ksin',rows:ksinRows.slice(0,limit),metric:metric};
+}
+
+/* ── OPEN INSIGHTS RENDERER ── */
+function oiRenderResult(data){
+  var resEl=document.getElementById('oiResult');
+  if(!resEl)return;
+  if(!data.rows||!data.rows.length){resEl.innerHTML='<div class="oi-empty">No results found.</div>';return;}
+  var metric=data.metric;
+  var html='<div class="oi-result-hdr">\uD83D\uDCCA '+data.title
+    +'<span style="margin-left:auto;font-size:11px;font-weight:400;color:#64748b">'+data.rows.length+' results</span></div>';
+
+  /* TREND TABLE (multi-period) */
+  if(data.type==='trend'){
+    var ps=data.periods,lk=ps[ps.length-1].key,fk=ps[0].key;
+    html+='<div style="overflow-x:auto"><table class="oi-table"><thead><tr><th>#</th>';
+    html+=data.isCl?'<th>Cluster</th><th>Stores</th>':'<th>Name</th>'+(data.rows[0]&&data.rows[0].l2?'<th>L2</th>':'');
+    ps.forEach(function(p){html+='<th style="text-align:right">'+p.label+'</th>';});
+    html+='<th>Trend</th><th>Δ%</th></tr></thead><tbody>';
+    data.rows.forEach(function(r,i){
+      var vals=ps.map(function(p){return r[p.key]||0;}),maxV=Math.max.apply(null,vals)||1;
+      var clr=badgeClr(r[lk]||0,r[fk]||0),p=pctChgStr(r[lk]||0,r[fk]||1);
+      var spark=vals.map(function(v,si){
+        var h=Math.max(2,Math.round(v/maxV*20));
+        return '<span style="display:inline-block;width:10px;height:'+h+'px;background:'+(si===vals.length-1?clr:'#334155')+';border-radius:2px 2px 0 0;vertical-align:bottom;margin-right:2px"></span>';
+      }).join('');
+      html+='<tr><td style="color:#475569;font-size:10px">'+(i+1)+'</td>';
+      if(data.isCl){html+='<td style="color:#a78bfa;font-weight:800">'+r.name+'</td><td style="text-align:center;color:#64748b">'+r.stores+'</td>';}
+      else{html+='<td style="color:#e2e8f0;font-weight:700;max-width:160px">'+(r.title||r.name)+'</td>'+(r.l2?'<td style="color:#475569;font-size:10px">'+r.l2+'</td>':'');}
+      ps.forEach(function(p2){html+='<td style="text-align:right;color:#94a3b8">'+fmtV(r[p2.key]||0,metric)+'</td>';});
+      html+='<td style="min-width:60px">'+spark+'</td>';
+      html+='<td><span style="background:'+badgeBg(r[lk]||0,r[fk]||0)+';color:'+clr+';padding:2px 8px;border-radius:99px;font-size:11px;font-weight:800">'+trendIcon(r[lk]||0,r[fk]||0)+' '+p+'</span></td>';
+      html+='</tr>';
+    });
+    html+='</tbody></table></div>';
+    if(data.l2rows&&data.l2rows.length){
+      html+='<div style="margin-top:10px"><div class="oi-result-hdr" style="font-size:11px">\uD83D\uDCC2 L2 Sub-category Breakdown</div>';
+      html+='<div style="overflow-x:auto"><table class="oi-table"><thead><tr><th>#</th><th>L2 Category</th>';
+      ps.forEach(function(p){html+='<th style="text-align:right">'+p.label+'</th>';});
+      html+='<th>Spark</th></tr></thead><tbody>';
+      data.l2rows.forEach(function(r,i){
+        var vals2=ps.map(function(p){return r[p.key]||0;}),maxV2=Math.max.apply(null,vals2)||1;
+        var clr2=badgeClr(r[lk]||0,r[fk]||0);
+        var spark2=vals2.map(function(v,si){var h=Math.max(2,Math.round(v/maxV2*14));return'<span style="display:inline-block;width:8px;height:'+h+'px;background:'+(si===vals2.length-1?clr2:'#334155')+';border-radius:1px 1px 0 0;vertical-align:bottom;margin-right:1px"></span>';}).join('');
+        html+='<tr><td style="color:#475569;font-size:10px">'+(i+1)+'</td><td style="color:#cbd5e1">'+r.name+'</td>';
+        ps.forEach(function(p2){html+='<td style="text-align:right;color:#64748b">'+fmtV(r[p2.key]||0,metric)+'</td>';});
+        html+='<td>'+spark2+'</td></tr>';
+      });
+      html+='</tbody></table></div></div>';
+    }
+    if(data.isL2Note)html+='<div style="font-size:10px;color:#475569;padding:6px 8px">* Mar/Apr/May Full figures at L2 level for older periods</div>';
+  }
+
+  /* KSIN TABLE */
+  else if(data.type==='ksin'){
+    html+='<div style="overflow-x:auto"><table class="oi-table"><thead><tr><th>#</th><th>Product</th><th>KSIN</th><th>Store</th><th>L2</th><th>May MTD</th><th>Jun MTD</th><th>\u0394</th><th>%</th></tr></thead><tbody>';
+    data.rows.forEach(function(r,i){
+      var clr=badgeClr(r.jv,r.mv),bg=badgeBg(r.jv,r.mv),p=pctChgStr(r.jv,r.mv);
+      html+='<tr>'
         +'<td style="color:#475569;font-size:10px">'+(i+1)+'</td>'
         +'<td style="color:#e2e8f0;font-weight:600;max-width:180px">'+(r.name||r.ksin)+'</td>'
-        +'<td style="color:#475569;font-size:10px;font-family:monospace">'+r.ksin+'</td>'
-        +'<td style="color:#94a3b8;font-size:11px">'+r.store+'</td>'
-        +'<td style="color:#475569;font-size:10px">'+r.l2+'</td>'
-        +'<td style="color:#64748b">'+fmtV(r.mv,metric)+'</td>'
-        +'<td style="color:#e2e8f0;font-weight:700">'+fmtV(r.jv,metric)+'</td>'
-        +'<td style="color:'+clr+';font-weight:700">'+(r.delta>=0?'+':'')+fmtV(Math.abs(r.delta),metric)+'</td>'
+        +'<td style="color:#475569;font-size:10px;font-family:monospace">'+(r.ksin||'')+'</td>'
+        +'<td style="color:#94a3b8;font-size:11px">'+(r.store||'All')+'</td>'
+        +'<td style="color:#475569;font-size:10px">'+(r.l2||'')+'</td>'
+        +'<td style="color:#64748b;text-align:right">'+fmtV(r.mv,metric)+'</td>'
+        +'<td style="color:#e2e8f0;font-weight:700;text-align:right">'+fmtV(r.jv,metric)+'</td>'
+        +'<td style="color:'+clr+';font-weight:700;text-align:right">'+(r.delta>=0?'+':'')+fmtV(Math.abs(r.delta||0),metric)+'</td>'
         +'<td><span style="background:'+bg+';color:'+clr+';padding:2px 8px;border-radius:99px;font-size:11px;font-weight:800">'+trendIcon(r.jv,r.mv)+' '+p+'</span></td>'
         +'</tr>';
     });
-  } else if (data.type === 'cluster') {
-    html += '<thead><tr><th>#</th><th>Cluster</th><th>Stores</th><th>May MTD</th><th>Jun MTD</th><th>Growth</th></tr></thead><tbody>';
-    rows.forEach(function(r,i) {
-      var clr=badgeClr(r.jv,r.mv); var bg=badgeBg(r.jv,r.mv); var p=pctChgStr(r.jv,r.mv);
-      html += '<tr>'
-        +'<td style="color:#475569;font-size:10px">'+(i+1)+'</td>'
-        +'<td style="color:#a78bfa;font-weight:800;font-size:13px">'+r.name+'</td>'
-        +'<td style="text-align:center;color:#94a3b8">'+r.stores+'</td>'
-        +'<td style="color:#64748b">'+fmtV(r.mv,metric)+'</td>'
-        +'<td style="color:#e2e8f0;font-weight:700">'+fmtV(r.jv,metric)+'</td>'
-        +'<td><span style="background:'+bg+';color:'+clr+';padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800">'+trendIcon(r.jv,r.mv)+' '+p+'</span></td>'
-        +'</tr>';
-    });
-  } else {
-    html += '<thead><tr><th>#</th><th>Store</th><th>Cluster</th><th>May MTD</th><th>Jun MTD</th><th>Growth</th></tr></thead><tbody>';
-    rows.forEach(function(r,i) {
-      var clr=badgeClr(r.jv,r.mv); var bg=badgeBg(r.jv,r.mv); var p=pctChgStr(r.jv,r.mv);
-      html += '<tr>'
-        +'<td style="color:#475569;font-size:10px">'+(i+1)+'</td>'
-        +'<td style="color:#e2e8f0;font-weight:600">'+r.name+'</td>'
-        +'<td style="color:#94a3b8">'+r.cluster+'</td>'
-        +'<td style="color:#64748b">'+fmtV(r.mv,metric)+'</td>'
-        +'<td style="color:#e2e8f0;font-weight:700">'+fmtV(r.jv,metric)+'</td>'
-        +'<td><span style="background:'+bg+';color:'+clr+';padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800">'+trendIcon(r.jv,r.mv)+' '+p+'</span></td>'
-        +'</tr>';
-    });
+    html+='</tbody></table></div>';
   }
-  html += '</tbody></table></div>';
-  resEl.innerHTML = html;
+
+  /* CLUSTER TABLE */
+  else if(data.type==='cluster'){
+    html+='<div style="overflow-x:auto"><table class="oi-table"><thead><tr><th>#</th><th>Cluster</th><th>Stores</th><th>May MTD</th><th>Jun MTD</th><th>Growth</th></tr></thead><tbody>';
+    data.rows.forEach(function(r,i){
+      var clr=badgeClr(r.jv,r.mv),bg=badgeBg(r.jv,r.mv);
+      html+='<tr><td style="color:#475569;font-size:10px">'+(i+1)+'</td><td style="color:#a78bfa;font-weight:800;font-size:13px">'+r.name+'</td><td style="text-align:center;color:#94a3b8">'+r.stores+'</td><td style="color:#64748b">'+fmtV(r.mv,metric)+'</td><td style="color:#e2e8f0;font-weight:700">'+fmtV(r.jv,metric)+'</td><td><span style="background:'+bg+';color:'+clr+';padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800">'+trendIcon(r.jv,r.mv)+' '+pctChgStr(r.jv,r.mv)+'</span></td></tr>';
+    });
+    html+='</tbody></table></div>';
+  }
+
+  /* STORE TABLE */
+  else{
+    html+='<div style="overflow-x:auto"><table class="oi-table"><thead><tr><th>#</th><th>Store</th><th>Cluster</th><th>May MTD</th><th>Jun MTD</th><th>Growth</th></tr></thead><tbody>';
+    data.rows.forEach(function(r,i){
+      var clr=badgeClr(r.jv,r.mv),bg=badgeBg(r.jv,r.mv);
+      html+='<tr><td style="color:#475569;font-size:10px">'+(i+1)+'</td><td style="color:#e2e8f0;font-weight:600">'+r.name+'</td><td style="color:#94a3b8">'+r.cluster+'</td><td style="color:#64748b">'+fmtV(r.mv,metric)+'</td><td style="color:#e2e8f0;font-weight:700">'+fmtV(r.jv,metric)+'</td><td><span style="background:'+bg+';color:'+clr+';padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800">'+trendIcon(r.jv,r.mv)+' '+pctChgStr(r.jv,r.mv)+'</span></td></tr>';
+    });
+    html+='</tbody></table></div>';
+  }
+  resEl.innerHTML=html;
 }
 
-function oiSetQ(q) {
-  var el = document.getElementById('oiQuery');
-  if (el) { el.value = q; el.focus(); }
+function oiSetQ(q){
+  var el=document.getElementById('oiQuery');
+  if(el){el.value=q;el.focus();}
   runOpenInsight();
 }
 
-function runOpenInsight() {
-  var qEl = document.getElementById('oiQuery');
-  var q = qEl ? qEl.value.trim() : '';
-  var resEl = document.getElementById('oiResult');
-  if (!resEl) return;
-  if (!q) { resEl.innerHTML = '<div class="oi-empty">💡 Type a question or pick a suggestion</div>'; return; }
-  resEl.innerHTML = '<div class="oi-loading">⚙️ Analysing your data...</div>';
-  setTimeout(function() {
-    try {
-      var data = oiQueryJS(q);
-      oiRenderResult(data);
-    } catch(e) {
-      resEl.innerHTML = '<div class="oi-empty" style="color:#f87171">⚠️ '+e.message+'</div>';
-    }
-  }, 10);
+function runOpenInsight(){
+  var qEl=document.getElementById('oiQuery');
+  var q=qEl?qEl.value.trim():'';
+  var resEl=document.getElementById('oiResult');
+  if(!resEl)return;
+  if(!q){resEl.innerHTML='<div class="oi-empty">\uD83D\uDCA1 Type a question or pick a suggestion</div>';return;}
+  resEl.innerHTML='<div class="oi-loading">\u2699\uFE0F Analysing your data\u2026</div>';
+  setTimeout(function(){
+    try{var data=oiQueryJS(q);oiRenderResult(data);}
+    catch(e){resEl.innerHTML='<div class="oi-empty" style="color:#f87171">\u26A0\uFE0F '+e.message+'</div>';}
+  },10);
 }
 
 /* ══ INIT ══ */
 function init(){
   document.getElementById('overlay').classList.add('hide');
-  buildUI(); render();
+  buildUI();render();
 }
 init();
 
